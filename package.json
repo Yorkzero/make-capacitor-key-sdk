@@ -1,6 +1,6 @@
 {
   "name": "make-capacitor-key-sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Capacitor蓝牙钥匙SDK，用于与蓝牙钥匙设备通讯",
   "main": "dist/index.js",
   "module": "dist/index.js",
