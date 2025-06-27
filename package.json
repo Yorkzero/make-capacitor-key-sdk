@@ -63,10 +63,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-username/make-capacitor-key-sdk.git"
+    "url": "git+https://github.com/Yorkzero/make-capacitor-key-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/make-capacitor-key-sdk/issues"
+    "url": "https://github.com/Yorkzero/make-capacitor-key-sdk/issues"
   },
-  "homepage": "https://github.com/your-username/make-capacitor-key-sdk#readme"
+  "homepage": "https://github.com/Yorkzero/make-capacitor-key-sdk#readme"
 }
