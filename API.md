@@ -2,7 +2,19 @@
 
 ## 概述
 
-基于 Capacitor 的美科蓝牙钥匙 SDK，专注于在线开锁功能。当钥匙插入锁具后，设备会主动上报状态信息，SDK 调用者根据上报信息决定是否开关锁。
+基于 Capacitor 的美科蓝牙钥匙 SDK，提供完整的蓝牙钥匙解决方案，支持在线开锁和离线开锁两种模式。
+
+### 在线开锁模式
+当钥匙插入锁具后，设备会主动上报状态信息，SDK 调用者根据上报信息决定是否开关锁。
+
+### 离线开锁模式 (v1.0.2+)
+支持预先配置开锁任务和锁具段下发，实现离线环境下的开锁功能。设备可以存储预设的开锁权限，在无蓝牙连接环境下也能正常开锁。
+
+### 核心特性
+- **在线开锁**: 实时状态监控
+- **离线开锁**: 任务配置和锁具段下发
+- **日志管理**: 开锁记录上传和状态跟踪
+
 
 ## 核心功能
 
@@ -13,26 +25,13 @@
 3. **业务决策** - SDK 调用者根据上报信息决定是否开锁
 4. **执行开锁** - 发送开锁命令到设备
 
-### 事件驱动架构
+### 离线开锁流程 (v1.0.2+)
 
-SDK 采用事件驱动架构，通过监听设备主动上报事件实现在线开锁：
-
-- `deviceReport` - 设备上报事件
-
-### 业务数据校验
-
-SDK 内置完整的业务数据校验机制，确保响应数据的有效性和完整性：
-
-```typescript
-// 发送命令时会自动进行业务数据校验
-const response = await sdk.sendCommand(deviceId, command);
-if (response.success) {
-  // response.parsedData 包含校验后的解析数据
-  console.log('校验后的数据:', response.parsedData);
-} else {
-  console.log('校验失败:', response.error);
-}
-```
+1. **任务配置** - 预先配置开锁权限（长期、临时、周期授权）
+2. **锁具段下发** - 将锁具ID范围下发到设备
+3. **离线存储** - 设备存储开锁权限信息
+4. **离线开锁** - 在无蓝牙连接环境下使用预设权限开锁
+5. **日志上传** - 连接蓝牙后上传开锁记录
 
 ## 主要类和方法
 
@@ -77,6 +76,187 @@ if (response.success) {
   console.log('命令执行成功:', response.parsedData);
 } else {
   console.log('命令执行失败:', response.error);
+}
+```
+
+#### 便捷操作方法
+
+##### unlock(deviceId: string, lockId: string | number)
+开锁操作。
+
+```typescript
+const response = await sdk.unlock(deviceId, 'LOCK_001');
+if (response.success) {
+  console.log('开锁成功');
+} else {
+  console.log('开锁失败:', response.error);
+}
+```
+
+##### lock(deviceId: string, lockId: string | number)
+关锁操作。
+
+```typescript
+const response = await sdk.lock(deviceId, 'LOCK_001');
+if (response.success) {
+  console.log('关锁成功');
+} else {
+  console.log('关锁失败:', response.error);
+}
+```
+
+##### forceUnlock(deviceId: string, lockId: string | number)
+强制开锁操作。
+
+```typescript
+const response = await sdk.forceUnlock(deviceId, 'LOCK_001');
+if (response.success) {
+  console.log('强制开锁成功');
+} else {
+  console.log('强制开锁失败:', response.error);
+}
+```
+
+##### forceLock(deviceId: string, lockId: string | number)
+强制关锁操作。
+
+```typescript
+const response = await sdk.forceLock(deviceId, 'LOCK_001');
+if (response.success) {
+  console.log('强制关锁成功');
+} else {
+  console.log('强制关锁失败:', response.error);
+}
+```
+
+##### syncTime(deviceId: string)
+校时操作。
+
+```typescript
+const response = await sdk.syncTime(deviceId);
+if (response.success) {
+  console.log('校时成功');
+} else {
+  console.log('校时失败:', response.error);
+}
+```
+
+##### readDeviceInfo(deviceId: string)
+读取设备信息。
+
+```typescript
+const response = await sdk.readDeviceInfo(deviceId);
+if (response.success) {
+  console.log('设备信息:', response.parsedData);
+} else {
+  console.log('读取设备信息失败:', response.error);
+}
+```
+
+#### 任务配置和锁具段下发
+
+##### addLongTermTaskAndSendSegments(deviceId: string, lockIds: (string | number)[])
+添加长期授权任务并下发锁具段。
+
+```typescript
+const result = await sdk.addLongTermTaskAndSendSegments(deviceId, [1, 2, 3, 4, 5]);
+if (result.taskConfigSuccess && result.segmentsSuccess) {
+  console.log('长期授权任务配置和锁具段下发全部成功');
+} else {
+  console.log('操作失败:', result.error);
+}
+```
+
+##### addTemporaryTaskAndSendSegments(deviceId: string, lockIds: (string | number)[], startTime: Date, endTime: Date)
+添加临时授权任务并下发锁具段。
+
+```typescript
+const startTime = new Date('2024-01-01');
+const endTime = new Date('2024-12-31');
+const result = await sdk.addTemporaryTaskAndSendSegments(deviceId, [1, 2, 3, 4, 5], startTime, endTime);
+if (result.taskConfigSuccess && result.segmentsSuccess) {
+  console.log('临时授权任务配置和锁具段下发全部成功');
+} else {
+  console.log('操作失败:', result.error);
+}
+```
+
+##### addPeriodicTaskAndSendSegments(deviceId: string, lockIds: (string | number)[], weeklySchedule: WeeklySchedule[])
+添加周期授权任务并下发锁具段。
+
+```typescript
+const weeklySchedule = [
+  {
+    week: 1, // 周一
+    authTimes: [
+      { startTime: '09:00', endTime: '18:00' }
+    ]
+  },
+  {
+    week: 2, // 周二
+    authTimes: [
+      { startTime: '09:00', endTime: '18:00' }
+    ]
+  }
+];
+
+const result = await sdk.addPeriodicTaskAndSendSegments(deviceId, [1, 2, 3, 4, 5], weeklySchedule);
+if (result.taskConfigSuccess && result.segmentsSuccess) {
+  console.log('周期授权任务配置和锁具段下发全部成功');
+} else {
+  console.log('操作失败:', result.error);
+}
+```
+
+##### deleteTask(deviceId: string)
+删除任务配置。
+
+```typescript
+const result = await sdk.deleteTask(deviceId);
+if (result.taskConfigSuccess) {
+  console.log('任务配置删除成功');
+} else {
+  console.log('任务配置删除失败:', result.error);
+}
+```
+
+#### 记录上传控制
+
+##### startRecordUpload(deviceId: string)
+启动记录上传。
+
+```typescript
+const response = await sdk.startRecordUpload(deviceId);
+if (response.success) {
+  console.log('记录上传启动成功');
+} else {
+  console.log('记录上传启动失败:', response.error);
+}
+```
+
+##### stopRecordUpload(deviceId: string)
+停止记录上传。
+
+```typescript
+const response = await sdk.stopRecordUpload(deviceId);
+if (response.success) {
+  console.log('记录上传停止成功');
+} else {
+  console.log('记录上传停止失败:', response.error);
+}
+```
+
+##### getRecordUploadState(deviceId: string)
+获取记录上传状态。
+
+```typescript
+const state = sdk.getRecordUploadState(deviceId);
+if (state) {
+  console.log('记录上传状态:', state.status);
+  console.log('日志数量:', state.logCount);
+  if (state.error) {
+    console.log('错误信息:', state.error);
+  }
 }
 ```
 
@@ -155,42 +335,6 @@ sdk.addLogListener((event) => {
 ##### removeLogListener(listener: LogEventListener)
 移除日志监听器。
 
-### CommandUtils
-
-#### 在线开锁相关命令
-
-##### buildConnectCommand()
-构建建立连接命令。
-
-##### buildTimeSyncCommand()
-构建校时命令。
-
-##### buildReadDeviceInfoCommand()
-构建读取设备信息命令。
-
-##### buildUnlockCommand(lockId: string | number)
-构建开锁命令。
-
-```typescript
-const command = CommandUtils.buildUnlockCommand('LOCK_001');
-```
-
-##### buildLockCommand(lockId: string | number)
-构建关锁命令。
-
-```typescript
-const command = CommandUtils.buildLockCommand('LOCK_001');
-```
-
-##### buildForceUnlockCommand(lockId: string | number)
-构建强制开锁命令。
-
-##### buildForceLockCommand(lockId: string | number)
-构建强制关锁命令。
-
-##### buildCustomCommand(command: string, data?: Uint8Array, timeout?: number)
-构建自定义命令。
-
 ## 事件类型
 
 ### 连接事件
@@ -199,6 +343,12 @@ const command = CommandUtils.buildLockCommand('LOCK_001');
 
 ### 在线开锁事件
 - `deviceReport` - 设备上报事件（包含所有上报信息）
+- `lockStatusReport` - 锁具状态上报事件
+- `deviceInfoReport` - 设备信息上报事件
+- `unlockLogReport` - 开锁日志上报事件
+
+### 记录上传事件
+- `recordUploadStatusChanged` - 记录上传状态变化事件
 
 ### 通用事件
 - `dataReceived` - 接收到数据
@@ -211,7 +361,7 @@ const command = CommandUtils.buildLockCommand('LOCK_001');
 ### BluetoothKeyEvent
 ```typescript
 interface BluetoothKeyEvent {
-  type: 'connected' | 'disconnected' | 'dataReceived' | 'error' | 'deviceReport' | 'lockStatusReport' | 'deviceInfoReport' | 'deviceFound' | 'scanCompleted';
+  type: 'connected' | 'disconnected' | 'dataReceived' | 'error' | 'deviceReport' | 'lockStatusReport' | 'deviceInfoReport' | 'unlockLogReport' | 'recordUploadStatusChanged' | 'deviceFound' | 'scanCompleted';
   deviceId?: string;
   data?: Uint8Array | BluetoothKeyDevice;
   error?: string;
@@ -220,6 +370,8 @@ interface BluetoothKeyEvent {
   deviceInfo?: DeviceInfo;
   lockId?: string;
   timestamp?: Date;
+  logInfo?: UnlockLogInfo;
+  recordUploadState?: RecordUploadState;
 }
 ```
 
@@ -237,6 +389,38 @@ interface LockStatus {
 ```typescript
 interface DeviceInfo {
   deviceId: string;
+}
+```
+
+### UnlockLogInfo
+```typescript
+interface UnlockLogInfo {
+  operationType: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK';
+  operationResult: 'SUCCESS' | 'FAILED';
+  lockId: string;
+  operationTime: Date;
+  rawData: Uint8Array;
+}
+```
+
+### RecordUploadState
+```typescript
+interface RecordUploadState {
+  status: RecordUploadStatus;
+  logCount?: number;
+  error?: string;
+  timestamp: Date;
+}
+```
+
+### WeeklySchedule
+```typescript
+interface WeeklySchedule {
+  week: number; // 0-6表示周日到周六
+  authTimes: Array<{
+    startTime?: string; // 'HH:MM'
+    endTime?: string;   // 'HH:MM'
+  }>;
 }
 ```
 
@@ -337,9 +521,13 @@ try {
 #### 业务相关
 - `LockStatus` - 锁具状态
 - `DeviceInfo` - 设备信息
+- `UnlockLogInfo` - 开锁日志信息
+- `RecordUploadState` - 记录上传状态
+- `WeeklySchedule` - 周期授权时间表
 - `BleOperateResult` - 操作结果
 - `LockState` - 锁具状态枚举
 - `BatteryState` - 电池状态枚举
+- `RecordUploadStatus` - 记录上传状态枚举
 
 #### 日志相关
 - `LogLevel` - 日志级别枚举
@@ -348,222 +536,11 @@ try {
 - `ProtocolDataLog` - 协议数据日志
 - `CompletePacketLog` - 完整数据包日志
 
-## 使用示例
-
-### 基本使用
-```typescript
-import { BluetoothKeySDK, CommandUtils, DEFAULT_CONFIG } from 'make-capacitor-key-sdk';
-
-// 创建 SDK 实例
-const sdk = new BluetoothKeySDK(DEFAULT_CONFIG);
-
-// 初始化
-await sdk.initialize();
-
-// 扫描设备
-const devices = await sdk.scanDevices(10000);
-
-// 连接设备
-if (devices.length > 0) {
-  await sdk.connectToDevice(devices[0].deviceId);
-  
-  // 发送命令（自动进行业务数据校验）
-  const unlockCommand = CommandUtils.buildUnlockCommand('LOCK_001');
-  const response = await sdk.sendCommand(devices[0].deviceId, unlockCommand);
-  
-  if (response.success) {
-    console.log('开锁成功:', response.parsedData);
-  } else {
-    console.log('开锁失败:', response.error);
-  }
-}
-```
-
-### 多设备连接管理
-```typescript
-import { BluetoothKeySDK, CommandUtils, DEFAULT_CONFIG } from 'make-capacitor-key-sdk';
-
-const sdk = new BluetoothKeySDK(DEFAULT_CONFIG);
-await sdk.initialize();
-
-// 扫描设备
-const devices = await sdk.scanDevices(10000);
-
-// 连接多个设备
-const connectedDevices: string[] = [];
-for (const device of devices.slice(0, 3)) { // 连接前3个设备
-  try {
-    await sdk.connectToDevice(device.deviceId, `KEY_${device.deviceId}`); // 每个设备使用不同的密钥
-    connectedDevices.push(device.deviceId);
-    console.log(`设备 ${device.name} 连接成功`);
-  } catch (error) {
-    console.log(`设备 ${device.name} 连接失败:`, error);
-  }
-}
-
-// 同时向多个设备发送命令
-const unlockCommand = CommandUtils.buildUnlockCommand('LOCK_001');
-const responses = await Promise.allSettled(
-  connectedDevices.map(deviceId => sdk.sendCommand(deviceId, unlockCommand))
-);
-
-responses.forEach((response, index) => {
-  const deviceId = connectedDevices[index];
-  if (response.status === 'fulfilled') {
-    console.log(`设备 ${deviceId} 开锁结果:`, response.value.success);
-    if (response.value.success) {
-      console.log('校验后的数据:', response.value.parsedData);
-    }
-  } else {
-    console.log(`设备 ${deviceId} 开锁失败:`, response.reason);
-  }
-});
-
-// 获取所有连接状态
-const allConnections = sdk.getAllConnectionStatus();
-console.log('当前连接数:', sdk.getConnectedDeviceCount());
-
-// 检查特定设备连接状态
-connectedDevices.forEach(deviceId => {
-  const isConnected = sdk.isDeviceConnected(deviceId);
-  console.log(`设备 ${deviceId} 连接状态:`, isConnected);
-});
-
-// 断开特定设备
-await sdk.disconnectDevice(connectedDevices[0]);
-
-// 断开所有设备
-await sdk.disconnectAll();
-```
-
-### 错误处理
-```typescript
-import { BluetoothKeySDK, BluetoothKeySDKError, BluetoothKeyError } from 'make-capacitor-key-sdk';
-
-try {
-  const sdk = new BluetoothKeySDK(DEFAULT_CONFIG);
-  await sdk.initialize();
-  
-  const devices = await sdk.scanDevices(10000);
-  if (devices.length === 0) {
-    console.log('未发现设备');
-    return;
-  }
-  
-  await sdk.connectToDevice(devices[0].deviceId);
-  
-} catch (error) {
-  if (error instanceof BluetoothKeySDKError) {
-    switch (error.errorType) {
-      case BluetoothKeyError.BLUETOOTH_NOT_SUPPORTED:
-        console.log('当前平台不支持蓝牙');
-        break;
-      case BluetoothKeyError.SDK_NOT_INITIALIZED:
-        console.log('SDK未初始化');
-        break;
-      case BluetoothKeyError.DEVICE_NOT_FOUND:
-        console.log('未找到设备');
-        break;
-      case BluetoothKeyError.CONNECTION_FAILED:
-        console.log('连接失败');
-        break;
-      default:
-        console.log('其他错误:', error.message);
-    }
-  } else {
-    console.log('未知错误:', error);
-  }
-}
-```
-
-### 事件监听
-```typescript
-// 监听数据接收
-sdk.addEventListener('dataReceived', (event) => {
-  console.log('收到数据:', event.data, '来自设备:', event.deviceId);
-});
-
-// 监听连接状态
-sdk.addEventListener('connected', (event) => {
-  console.log('设备已连接:', event.deviceId);
-});
-
-sdk.addEventListener('disconnected', (event) => {
-  console.log('设备已断开:', event.deviceId);
-});
-
-// 监听锁具状态上报
-sdk.addEventListener('lockStatusReport', (event) => {
-  console.log('锁具状态:', event.lockStatus);
-  console.log('锁ID:', event.lockId);
-});
-
-// 监听错误事件
-sdk.addEventListener('error', (event) => {
-  console.log('发生错误:', event.error, '设备:', event.deviceId);
-});
-```
-
-### 日志功能
-```typescript
-import { LogLevel } from 'make-capacitor-key-sdk';
-
-// 设置日志级别
-sdk.setLogLevel(LogLevel.INFO);
-
-// 启用详细日志
-sdk.setDetailedLogsEnabled(true);
-
-// 添加日志监听器
-sdk.addLogListener((event) => {
-  console.log(`[${event.level.toUpperCase()}] ${event.message}`);
-  
-  // 如果有协议数据，显示格式化内容
-  if (event.protocolData) {
-    console.log(LogUtils.formatProtocolDataLog(event.protocolData));
-  }
-  
-  // 如果有完整数据包，显示格式化内容
-  if (event.completePacket) {
-    console.log(LogUtils.formatCompletePacketLog(event.completePacket));
-  }
-});
-```
-
-### 自定义配置
-```typescript
-const customConfig = {
-  serviceUUID: 'YOUR_SERVICE_UUID',
-  writeCharacteristicUUID: 'YOUR_WRITE_UUID',
-  notifyCharacteristicUUID: 'YOUR_NOTIFY_UUID',
-  secretKey: 'YOUR_SECRET_KEY',
-  commandTimeout: 10000,
-};
-
-const sdk = new BluetoothKeySDK(customConfig);
-```
-
-## 多连接管理API
-
-### 连接管理
-- `connectToDevice(deviceId: string, secretKey?: string)` - 连接指定设备
-- `disconnectDevice(deviceId: string)` - 断开指定设备
-- `disconnectAll()` - 断开所有设备
-
-### 状态查询
-- `getConnectionStatus(deviceId: string)` - 获取指定设备连接状态
-- `getAllConnectionStatus()` - 获取所有设备连接状态
-- `isDeviceConnected(deviceId: string)` - 检查指定设备是否已连接
-- `getConnectedDeviceCount()` - 获取已连接设备数量
-
-### 命令发送
-- `sendCommand(deviceId: string, command: BluetoothKeyCommand, transportOptions?: TransportOptions)` - 向指定设备发送命令
-
 ## 版本信息
 
 ```typescript
 import { SDK_VERSION } from 'make-capacitor-key-sdk';
-console.log('SDK版本:', SDK_VERSION); // '1.0.0'
+console.log('SDK版本:', SDK_VERSION); // '1.0.2'
 ```
 
 ---

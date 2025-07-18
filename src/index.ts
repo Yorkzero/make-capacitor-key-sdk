@@ -1,6 +1,5 @@
 // 导出主要公共API
 export { BluetoothKeySDK } from './BluetoothKeySDK';
-export { CommandUtils } from './utils/CommandUtils';
 export { LogUtils } from './utils/LogUtils';
 
 // 导出类型定义（用户需要使用的类型）
@@ -44,4 +43,4 @@ export const DEFAULT_CONFIG = {
 };
 
 // 导出SDK版本
-export const SDK_VERSION = '1.0.0'; 
+export const SDK_VERSION = '1.0.2'; 

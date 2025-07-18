@@ -21,6 +21,8 @@ import {
     TransportAckType,
     TransportEncryptType,
     ConnectionStatus,
+    RecordUploadStatus,
+    RecordUploadState,
 } from './types';
 import { PhysicalLayer } from './protocol/PhysicalLayer';
 import { TransportLayerV1 } from './protocol/TransportLayer';
@@ -72,6 +74,9 @@ export class BluetoothKeySDK {
 
     // 断开连接状态跟踪 - 避免重复处理
     private disconnectingDevices: Set<string> = new Set();
+
+    // 记录上传状态管理 - 每个设备独立管理
+    private recordUploadStates: Map<string, RecordUploadState> = new Map();
 
     constructor(config: BluetoothKeyConfig) {
         const defaultConfig: BluetoothKeyConfig = {
@@ -559,6 +564,7 @@ export class BluetoothKeySDK {
             this.businessResults.delete(deviceId);
             this.dataBuffers.delete(deviceId);
             this.pendingFrameResponses.delete(deviceId);
+            this.recordUploadStates.delete(deviceId);
             
             // 清理认证状态和认证Promise
             this._authStatusMap.delete(deviceId);
@@ -980,8 +986,8 @@ export class BluetoothKeySDK {
         if (!data || data.length === 0) return false;
         
         const command = data[0];
-        // 设备主动上报的命令：UPLOAD_STATUS (0x07) 和 GET_SYS_PARAM (0x05)
-        return command === BusinessCmd.UPLOAD_STATUS || command === BusinessCmd.GET_SYS_PARAM;
+        // 设备主动上报的命令:设备主动上报信息，记录上传完成，设备主动上传记录
+        return command === 0x07 || command === 0x0A || command === 0x0B;
     }
 
     /**
@@ -1032,14 +1038,123 @@ export class BluetoothKeySDK {
     }
 
     /**
-     * 处理日志上报事件
+     * 处理开锁日志上报事件
      */
-    private handleLogReportEvent(deviceId: string, data: Uint8Array): void {
-        // 这里可以解析日志数据并触发相应事件
-        this.emitEvent('dataReceived', {
+    private handleUnlockLogReport(deviceId: string, data: Uint8Array): void {
+        try {
+            // 使用 CommandUtils 解析开锁日志数据
+            const logInfo = CommandUtils.parseUnlockLogData(data);
+            
+            // 更新记录上传状态（增加日志计数）
+            this.updateRecordUploadLogCount(deviceId);
+            
+            // 触发开锁日志上报事件
+            this.emitEvent('unlockLogReport', {
+                deviceId,
+                data: data,
+                logInfo: logInfo,
+                operationType: logInfo.operationType,
+                operationResult: logInfo.operationResult,
+                lockId: logInfo.lockId,
+                operationTime: logInfo.operationTime,
+            });
+
+            this.log(LogLevel.INFO, `开锁日志上报处理完成: ${CommandUtils.getOperationTypeDescription(logInfo.operationType)} - ${logInfo.operationResult}`, deviceId);
+        } catch (error) {
+            this.log(LogLevel.ERROR, '解析开锁日志数据失败', deviceId, undefined, undefined, error instanceof Error ? error : undefined);
+            this.emitEvent('error', {
+                deviceId,
+                error: `解析开锁日志数据失败: ${error instanceof Error ? error.message : '未知错误'}`,
+            });
+        }
+    }
+
+    /**
+     * 获取记录上传状态
+     */
+    getRecordUploadState(deviceId: string): RecordUploadState | null {
+        return this.recordUploadStates.get(deviceId) || null;
+    }
+
+    /**
+     * 更新记录上传状态
+     */
+    private updateRecordUploadState(deviceId: string, status: RecordUploadStatus, error?: string): void {
+        const currentState = this.recordUploadStates.get(deviceId) || {
+            status: RecordUploadStatus.IDLE,
             deviceId,
-            data: data,
+            logCount: 0
+        };
+
+        const newState: RecordUploadState = {
+            ...currentState,
+            status,
+            error,
+        };
+
+        // 根据状态设置时间
+        if (status === RecordUploadStatus.UPLOADING && !currentState.startTime) {
+            newState.startTime = new Date();
+        } else if (status === RecordUploadStatus.COMPLETED || status === RecordUploadStatus.ERROR) {
+            newState.endTime = new Date();
+        }
+
+        this.recordUploadStates.set(deviceId, newState);
+
+        // 触发状态变化事件
+        this.emitEvent('recordUploadStatusChanged', {
+            deviceId,
+            recordUploadState: newState,
         });
+
+        this.log(LogLevel.INFO, `记录上传状态更新: ${status}`, deviceId);
+    }
+
+    /**
+     * 更新记录上传日志计数
+     */
+    private updateRecordUploadLogCount(deviceId: string): void {
+        const currentState = this.recordUploadStates.get(deviceId);
+        if (currentState && currentState.status === RecordUploadStatus.UPLOADING) {
+            const newState: RecordUploadState = {
+                ...currentState,
+                logCount: (currentState.logCount || 0) + 1,
+            };
+            this.recordUploadStates.set(deviceId, newState);
+
+            // 触发状态变化事件
+            this.emitEvent('recordUploadStatusChanged', {
+                deviceId,
+                recordUploadState: newState,
+            });
+        }
+    }
+
+
+
+    /**
+     * 处理记录上传完成事件（设备主动上报）
+     */
+    private handleRecordUploadComplete(deviceId: string, data: Uint8Array): void {
+        try {
+            // 更新状态为完成中
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.COMPLETING);
+
+            // 验证设备发送的完成命令：0x0A 0x02
+            if (data.length !== 2 || data[0] !== 0x0A || data[1] !== 0x02) {
+                const error = `记录上传完成命令格式错误，期望: [0x0A, 0x02]，实际: [${Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}]`;
+                this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, error);
+                this.log(LogLevel.ERROR, error, deviceId);
+                return;
+            }
+
+            // 更新状态为已完成
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.COMPLETED);
+            this.log(LogLevel.INFO, '记录上传完成', deviceId);
+        } catch (error) {
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, error instanceof Error ? error.message : '未知错误');
+            this.log(LogLevel.ERROR, '处理记录上传完成事件失败', deviceId, undefined, undefined, error instanceof Error ? error : undefined);
+        }
     }
 
     /**
@@ -1230,10 +1345,22 @@ export class BluetoothKeySDK {
                 case BusinessCmd.UPLOAD_STATUS:
                     // 状态上报回复：0x07 + 0x01 (成功)
                     replyData = new Uint8Array([0x07, 0x01]);
+                    this.handleDeviceReport(deviceId, data);
                     break;
                 case BusinessCmd.GET_SYS_PARAM:
                     // 系统参数回复：0x05 + 0x01 (成功)
                     replyData = new Uint8Array([0x05, 0x01]);
+                    this.handleDeviceReport(deviceId, data);
+                    break;
+                case 0x0A:
+                    // 记录上传完成回复：0x0A + 0x01 (成功)
+                    replyData = new Uint8Array([0x0A, 0x01]);
+                    this.handleRecordUploadComplete(deviceId, data);
+                    break;
+                case 0x0B:
+                    // 开锁日志上报回复：0x0B + 0x01 (成功)
+                    replyData = new Uint8Array([0x0B, 0x01]);
+                    this.handleUnlockLogReport(deviceId, data);
                     break;
                 default:
                     // 其他命令回复：命令 + 0x01 (成功)
@@ -1376,6 +1503,7 @@ export class BluetoothKeySDK {
             this.businessResults.delete(deviceId);
             this.dataBuffers.delete(deviceId);
             this.pendingFrameResponses.delete(deviceId);
+            this.recordUploadStates.delete(deviceId);
             
             // 清理认证状态和认证Promise
             this._authStatusMap.delete(deviceId);
@@ -1409,7 +1537,6 @@ export class BluetoothKeySDK {
             // 设备主动上报
             if (this.isDeviceReport(data)) {
                 this.log(LogLevel.DEBUG, '设备主动上报数据', deviceId);
-                this.handleDeviceReport(deviceId, data);
                 await this.handleDeviceActiveCommand(deviceId, frameIndex, data);
                 return;
             }
@@ -1505,6 +1632,7 @@ export class BluetoothKeySDK {
             this.businessResults.delete(deviceId);
             this.dataBuffers.delete(deviceId);
             this.pendingFrameResponses.delete(deviceId);
+            this.recordUploadStates.delete(deviceId);
             
             // 清理认证状态和认证Promise
             this._authStatusMap.delete(deviceId);
@@ -1548,5 +1676,373 @@ export class BluetoothKeySDK {
             parsedData: validationResult.parsedData,
             error: validationResult.error
         };
+    }
+
+    // ==================== 便捷方法封装 ====================
+
+    /**
+     * 开锁操作
+     */
+    async unlock(deviceId: string, lockId: string | number): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildUnlockCommand(lockId);
+        return await this.sendCommand(deviceId, command);
+    }
+
+    /**
+     * 关锁操作
+     */
+    async lock(deviceId: string, lockId: string | number): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildLockCommand(lockId);
+        return await this.sendCommand(deviceId, command);
+    }
+
+    /**
+     * 强制开锁操作
+     */
+    async forceUnlock(deviceId: string, lockId: string | number): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildForceUnlockCommand(lockId);
+        return await this.sendCommand(deviceId, command);
+    }
+
+    /**
+     * 强制关锁操作
+     */
+    async forceLock(deviceId: string, lockId: string | number): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildForceLockCommand(lockId);
+        return await this.sendCommand(deviceId, command);
+    }
+
+    /**
+     * 校时操作
+     */
+    async syncTime(deviceId: string): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildTimeSyncCommand();
+        return await this.sendCommand(deviceId, command);
+    }
+
+    /**
+     * 读取设备信息
+     */
+    async readDeviceInfo(deviceId: string): Promise<BluetoothKeyResponse> {
+        const command = CommandUtils.buildReadDeviceInfoCommand();
+        return await this.sendCommand(deviceId, command);
+    }
+
+
+
+    /**
+     * 下发锁具段（私有方法）
+     */
+    private async sendLockSegments(deviceId: string, lockIds: (string | number)[]): Promise<BluetoothKeyResponse[]> {
+        const commands = CommandUtils.buildLockSegmentsCommand(lockIds);
+        const responses: BluetoothKeyResponse[] = [];
+        
+        for (const command of commands) {
+            const response = await this.sendCommand(deviceId, command);
+            responses.push(response);
+            
+            // 如果某个命令失败，可以选择是否继续发送后续命令
+            if (!response.success) {
+                this.log(LogLevel.WARN, `锁具段下发失败，停止后续发送`, deviceId);
+                break;
+            }
+        }
+        
+        return responses;
+    }
+
+    /**
+     * 配置任务并下发锁具段（整合操作，私有方法）
+     * @param deviceId 设备ID
+     * @param lockIds 锁具ID列表
+     * @param taskConfig 任务配置参数
+     * @returns 操作结果
+     */
+    private async configureTaskAndSendSegments(
+        deviceId: string,
+        lockIds: (string | number)[],
+        taskConfig: {
+            operationType: 0 | 1; // 0-删除，1-添加
+            authType?: 0 | 1 | 2; // 0长期授权，1临时授权，2周期授权
+            startTime?: Date; // 临时授权起始时间
+            endTime?: Date; // 临时授权结束时间
+            weeklySchedule?: Array<{
+                week: number; // 0-6表示周日到周六
+                authTimes: Array<{
+                    startTime?: string; // 'HH:MM'
+                    endTime?: string;   // 'HH:MM'
+                }>;
+            }>;
+        }
+    ): Promise<{
+        taskConfigSuccess: boolean;
+        segmentsSuccess: boolean;
+        taskConfigResponse?: BluetoothKeyResponse;
+        segmentsResponses?: BluetoothKeyResponse[];
+        error?: string;
+    }> {
+        try {
+            // 检查设备连接状态
+            if (!this.isDeviceConnected(deviceId)) {
+                throw BluetoothKeySDKError.deviceNotConnected();
+            }
+
+            // 计算号段
+            const segments = CommandUtils.convertLockIdsToSegments(lockIds);
+            const segmentCount = segments.length;
+
+            this.log(LogLevel.INFO, `开始配置任务并下发锁具段，锁具数量: ${lockIds.length}，号段数量: ${segmentCount}`, deviceId);
+
+            // 1. 先发送任务配置命令
+            let taskConfigCommand: BluetoothKeyCommand;
+            if (taskConfig.operationType === 0) {
+                // 删除任务配置
+                taskConfigCommand = CommandUtils.buildDeleteTaskConfigCommand(segmentCount);
+            } else {
+                // 添加任务配置
+                if (taskConfig.authType === 1 && taskConfig.startTime && taskConfig.endTime) {
+                    // 临时授权
+                    taskConfigCommand = CommandUtils.buildAddTemporaryTaskConfigCommand(
+                        segmentCount,
+                        taskConfig.startTime,
+                        taskConfig.endTime
+                    );
+                } else if (taskConfig.authType === 2 && taskConfig.weeklySchedule) {
+                    // 周期授权
+                    taskConfigCommand = CommandUtils.buildAddPeriodicTaskConfigCommand(
+                        segmentCount,
+                        taskConfig.weeklySchedule
+                    );
+                } else {
+                    // 长期授权
+                    taskConfigCommand = CommandUtils.buildAddLongTermTaskConfigCommand(segmentCount);
+                }
+            }
+
+            const taskConfigResponse = await this.sendCommand(deviceId, taskConfigCommand);
+            
+            if (!taskConfigResponse.success) {
+                this.log(LogLevel.ERROR, `任务配置失败: ${taskConfigResponse.error}`, deviceId);
+                return {
+                    taskConfigSuccess: false,
+                    segmentsSuccess: false,
+                    taskConfigResponse,
+                    error: `任务配置失败: ${taskConfigResponse.error}`
+                };
+            }
+
+            this.log(LogLevel.INFO, '任务配置成功，开始下发锁具段', deviceId);
+
+            // 2. 再发送锁具段下发命令
+            const segmentsResponses = await this.sendLockSegments(deviceId, lockIds);
+            
+            // 检查所有锁具段下发是否成功
+            const allSegmentsSuccess = segmentsResponses.every(response => response.success);
+            
+            if (allSegmentsSuccess) {
+                this.log(LogLevel.INFO, '任务配置和锁具段下发全部成功', deviceId);
+            } else {
+                this.log(LogLevel.WARN, '部分锁具段下发失败', deviceId);
+            }
+
+            return {
+                taskConfigSuccess: true,
+                segmentsSuccess: allSegmentsSuccess,
+                taskConfigResponse,
+                segmentsResponses,
+                error: allSegmentsSuccess ? undefined : '部分锁具段下发失败'
+            };
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : '未知错误';
+            this.log(LogLevel.ERROR, `配置任务并下发锁具段失败: ${errorMessage}`, deviceId);
+            return {
+                taskConfigSuccess: false,
+                segmentsSuccess: false,
+                error: errorMessage
+            };
+        }
+    }
+
+    /**
+     * 添加长期授权任务并下发锁具段
+     */
+    async addLongTermTaskAndSendSegments(
+        deviceId: string,
+        lockIds: (string | number)[]
+    ): Promise<{
+        taskConfigSuccess: boolean;
+        segmentsSuccess: boolean;
+        taskConfigResponse?: BluetoothKeyResponse;
+        segmentsResponses?: BluetoothKeyResponse[];
+        error?: string;
+    }> {
+        return await this.configureTaskAndSendSegments(deviceId, lockIds, {
+            operationType: 1,
+            authType: 0
+        });
+    }
+
+    /**
+     * 添加临时授权任务并下发锁具段
+     */
+    async addTemporaryTaskAndSendSegments(
+        deviceId: string,
+        lockIds: (string | number)[],
+        startTime: Date,
+        endTime: Date
+    ): Promise<{
+        taskConfigSuccess: boolean;
+        segmentsSuccess: boolean;
+        taskConfigResponse?: BluetoothKeyResponse;
+        segmentsResponses?: BluetoothKeyResponse[];
+        error?: string;
+    }> {
+        return await this.configureTaskAndSendSegments(deviceId, lockIds, {
+            operationType: 1,
+            authType: 1,
+            startTime,
+            endTime
+        });
+    }
+
+    /**
+     * 添加周期授权任务并下发锁具段
+     */
+    async addPeriodicTaskAndSendSegments(
+        deviceId: string,
+        lockIds: (string | number)[],
+        weeklySchedule: Array<{
+            week: number;
+            authTimes: Array<{
+                startTime?: string;
+                endTime?: string;
+            }>;
+        }>
+    ): Promise<{
+        taskConfigSuccess: boolean;
+        segmentsSuccess: boolean;
+        taskConfigResponse?: BluetoothKeyResponse;
+        segmentsResponses?: BluetoothKeyResponse[];
+        error?: string;
+    }> {
+        return await this.configureTaskAndSendSegments(deviceId, lockIds, {
+            operationType: 1,
+            authType: 2,
+            weeklySchedule
+        });
+    }
+
+    /**
+     * 删除任务配置
+     */
+    async deleteTask(deviceId: string): Promise<{
+        taskConfigSuccess: boolean;
+        taskConfigResponse?: BluetoothKeyResponse;
+        error?: string;
+    }> {
+        try {
+            // 检查设备连接状态
+            if (!this.isDeviceConnected(deviceId)) {
+                throw BluetoothKeySDKError.deviceNotConnected();
+            }
+
+            this.log(LogLevel.INFO, '开始删除任务配置', deviceId);
+
+            // 发送删除任务配置命令（号段数量为0表示删除所有任务）
+            const taskConfigCommand = CommandUtils.buildDeleteTaskConfigCommand(0);
+            const taskConfigResponse = await this.sendCommand(deviceId, taskConfigCommand);
+            
+            if (taskConfigResponse.success) {
+                this.log(LogLevel.INFO, '任务配置删除成功', deviceId);
+                return {
+                    taskConfigSuccess: true,
+                    taskConfigResponse
+                };
+            } else {
+                this.log(LogLevel.ERROR, `任务配置删除失败: ${taskConfigResponse.error}`, deviceId);
+                return {
+                    taskConfigSuccess: false,
+                    taskConfigResponse,
+                    error: `任务配置删除失败: ${taskConfigResponse.error}`
+                };
+            }
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : '未知错误';
+            this.log(LogLevel.ERROR, `删除任务配置失败: ${errorMessage}`, deviceId);
+            return {
+                taskConfigSuccess: false,
+                error: errorMessage
+            };
+        }
+    }
+
+    /**
+     * 启动记录上传
+     */
+    async startRecordUpload(deviceId: string): Promise<BluetoothKeyResponse> {
+        try {
+            // 检查设备连接状态
+            if (!this.isDeviceConnected(deviceId)) {
+                throw BluetoothKeySDKError.deviceNotConnected();
+            }
+
+            // 更新状态为开始中
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.STARTING);
+
+            // 发送开始记录上传命令
+            const command = CommandUtils.buildStartRecordUploadCommand();
+            const response = await this.sendCommand(deviceId, command);
+
+            if (response.success) {
+                // 更新状态为传输中
+                this.updateRecordUploadState(deviceId, RecordUploadStatus.UPLOADING);
+                this.log(LogLevel.INFO, '记录上传开始成功', deviceId);
+            } else {
+                // 更新状态为错误
+                this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, response.error);
+                this.log(LogLevel.ERROR, `记录上传开始失败: ${response.error}`, deviceId);
+            }
+
+            return response;
+        } catch (error) {
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, error instanceof Error ? error.message : '未知错误');
+            throw error;
+        }
+    }
+
+    /**
+     * 停止记录上传
+     */
+    async stopRecordUpload(deviceId: string): Promise<BluetoothKeyResponse> {
+        try {
+            // 检查设备连接状态
+            if (!this.isDeviceConnected(deviceId)) {
+                throw BluetoothKeySDKError.deviceNotConnected();
+            }
+
+            // 更新状态为暂停中
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.PAUSING);
+
+            // 发送停止记录上传命令
+            const command = CommandUtils.buildStopRecordUploadCommand();
+            const response = await this.sendCommand(deviceId, command);
+
+            if (response.success) {
+                // 更新状态为已暂停
+                this.updateRecordUploadState(deviceId, RecordUploadStatus.PAUSED);
+                this.log(LogLevel.INFO, '记录上传停止成功', deviceId);
+            } else {
+                // 更新状态为错误
+                this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, response.error);
+                this.log(LogLevel.ERROR, `记录上传停止失败: ${response.error}`, deviceId);
+            }
+
+            return response;
+        } catch (error) {
+            this.updateRecordUploadState(deviceId, RecordUploadStatus.ERROR, error instanceof Error ? error.message : '未知错误');
+            throw error;
+        }
     }
 }

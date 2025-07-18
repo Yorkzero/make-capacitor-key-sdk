@@ -98,6 +98,339 @@ export class CommandUtils {
   }
 
   /**
+   * 构建下发任务配置命令（0x0C）
+   * @param operationType 操作类型：0-删除，1-添加
+   * @param segmentCount 号段总数，最大65535
+   * @param authType 授权类型：0长期授权，1临时授权，2周期授权
+   * @param startTime 有效期起始时间（临时授权时使用）
+   * @param endTime 有效期结束时间（临时授权时使用）
+   * @param weeklySchedule 周期授权的时间段配置（周期授权时使用）
+   */
+  static buildTaskConfigCommand(
+    operationType: 0 | 1,
+    segmentCount: number,
+    authType: 0 | 1 | 2 = 0,
+    startTime?: Date,
+    endTime?: Date,
+    weeklySchedule?: Array<{
+      week: number; // 0-6表示周日到周六
+      authTimes: Array<{
+        startTime?: string; // 'HH:MM'
+        endTime?: string;   // 'HH:MM'
+      }>;
+    }>
+  ): BluetoothKeyCommand {
+    const data: number[] = [0x0C, operationType];
+    // 号段总数（小端2字节）
+    data.push(segmentCount & 0xFF, (segmentCount >> 8) & 0xFF);
+    const validCount = 0xFFFF;
+    // 有效次数（小端2字节）
+    data.push(validCount & 0xFF, (validCount >> 8) & 0xFF);
+    // 授权类型
+    data.push(authType);
+    if (authType === 1 && startTime && endTime) {
+      // 临时授权，添加起止时间（各6字节BCD）
+      data.push(...CommandUtils.dateToBCD(startTime));
+      data.push(...CommandUtils.dateToBCD(endTime));
+    } else if (authType === 2 && weeklySchedule) {
+      // 周期授权
+      for (const day of weeklySchedule) {
+        const tmp: number[] = [];
+        tmp.push(day.week % 7);
+        let slotCount = 0;
+        for (const timeSlot of day.authTimes) {
+          if (timeSlot.startTime && timeSlot.endTime && timeSlot.startTime !== '' && timeSlot.endTime !== '') {
+            const [sh, sm] = timeSlot.startTime.split(':').map(Number);
+            const [eh, em] = timeSlot.endTime.split(':').map(Number);
+            tmp.push(sh, sm, eh, em);
+          } else {
+            tmp.push(0x00, 0x00, 0x00, 0x00);
+          }
+          slotCount++;
+          if (slotCount >= 2) break;
+        }
+        // 不足2个时段补0
+        while (slotCount < 2) {
+          tmp.push(0x00, 0x00, 0x00, 0x00);
+          slotCount++;
+        }
+        // 保证每个周期配置9字节
+        while (tmp.length < 9) tmp.push(0x00);
+        data.push(...tmp);
+      }
+    }
+    return {
+      command: 'TASK_CONFIG',
+      data: new Uint8Array(data),
+      timeout: 5000,
+    };
+  }
+
+  /**
+   * 构建删除任务配置命令（0x0C, 0, ...）
+   */
+  static buildDeleteTaskConfigCommand(segmentCount: number = 0): BluetoothKeyCommand {
+    return CommandUtils.buildTaskConfigCommand(0, segmentCount);
+  }
+
+  /**
+   * 构建添加长期授权任务配置命令（0x0C, 1, ..., 0）
+   */
+  static buildAddLongTermTaskConfigCommand(segmentCount: number): BluetoothKeyCommand {
+    return CommandUtils.buildTaskConfigCommand(1, segmentCount);
+  }
+
+  /**
+   * 构建添加临时授权任务配置命令（0x0C, 1, ..., 1, startTime, endTime）
+   */
+  static buildAddTemporaryTaskConfigCommand(
+    segmentCount: number,
+    startTime: Date,
+    endTime: Date,
+  ): BluetoothKeyCommand {
+    return CommandUtils.buildTaskConfigCommand(1, segmentCount, 1, startTime, endTime);
+  }
+
+  /**
+   * 构建添加周期授权任务配置命令（0x0C, 1, ..., 2, weeklySchedule）
+   */
+  static buildAddPeriodicTaskConfigCommand(
+    segmentCount: number,
+    weeklySchedule: Array<{
+      week: number;
+      authTimes: Array<{
+        startTime?: string;
+        endTime?: string;
+      }>;
+    }>,
+  ): BluetoothKeyCommand {
+    return CommandUtils.buildTaskConfigCommand(1, segmentCount, 2, undefined, undefined, weeklySchedule);
+  }
+
+  /**
+   * 将锁具ID列表转换为号段列表
+   * @param lockIds 锁具ID列表
+   * @returns 号段列表，每个号段包含 [start, end]
+   */
+  static convertLockIdsToSegments(lockIds: (string | number)[]): Array<[number, number]> {
+    const ids = lockIds
+      .map(id => typeof id === 'string' ? parseInt(id, 10) || 0 : id)
+      .filter(id => id > 0)
+      .sort((a, b) => a - b);
+
+    const segments: Array<[number, number]> = [];
+    
+    if (ids.length === 0) {
+      return segments;
+    }
+
+    let start = ids[0];
+    let end = ids[0];
+
+    for (let i = 1; i < ids.length; i++) {
+      if (ids[i] === end + 1) {
+        end = ids[i];
+      } else {
+        segments.push([start, end]);
+        start = ids[i];
+        end = ids[i];
+      }
+    }
+    
+    segments.push([start, end]);
+    return segments;
+  }
+
+  /**
+   * 将号段列表转换为字节数据包列表
+   * @param segments 号段列表，每个号段包含 [start, end]
+   * @returns 字节数据包列表，每个包包含命令标识、帧大小和锁具段数据
+   */
+  static convertSegmentsToPackets(segments: Array<[number, number]>): Uint8Array[] {
+    const packets: Uint8Array[] = [];
+    const currentChunk: number[] = [];
+
+    for (const segment of segments) {
+      // 每个号段包含两个数字：start 和 end
+      for (const number of segment) {
+        // 每个数字占4字节（小端模式）
+        currentChunk.push(
+          number & 0xFF,
+          (number >> 8) & 0xFF,
+          (number >> 16) & 0xFF,
+          (number >> 24) & 0xFF
+        );
+
+        // 当达到最大帧大小时（25个号段 * 8字节 = 200字节 + 1字节帧大小 + 1字节命令标识 = 202字节）
+        if (currentChunk.length >= 25 * 8) {
+          const packet = new Uint8Array([0x0D, currentChunk.length / 8, ...currentChunk]);
+          packets.push(packet);
+          currentChunk.length = 0; // 清空当前块
+        }
+      }
+    }
+
+    // 处理剩余的数据
+    if (currentChunk.length > 0) {
+      const packet = new Uint8Array([0x0D, currentChunk.length / 8, ...currentChunk]);
+      packets.push(packet);
+    }
+
+    return packets;
+  }
+
+  /**
+   * 构建锁具段下发命令（0x0D）
+   * @param lockIds 锁具ID列表
+   * @returns 锁具段下发命令包列表，每个包包含号段范围数据
+   */
+  static buildLockSegmentsCommand(lockIds: (string | number)[]): BluetoothKeyCommand[] {
+    const segments = CommandUtils.convertLockIdsToSegments(lockIds);
+    const packets = CommandUtils.convertSegmentsToPackets(segments);
+    
+    return packets.map(packet => ({
+      command: 'LOCK_SEGMENTS',
+      data: packet,
+      timeout: 5000,
+    }));
+  }
+
+  /**
+   * 构建记录上传控制命令（0x0A）
+   * @param operationType 操作类型：0-停止，1-启动，2-完成
+   * @returns 记录上传控制命令
+   */
+  static buildRecordUploadControlCommand(operationType: 0 | 1 | 2): BluetoothKeyCommand {
+    return {
+      command: 'RECORD_UPLOAD_CONTROL',
+      data: new Uint8Array([0x0A, operationType]),
+      timeout: 5000,
+    };
+  }
+
+  /**
+   * 构建启动记录上传命令（0x0A, 0x01）
+   */
+  static buildStartRecordUploadCommand(): BluetoothKeyCommand {
+    return CommandUtils.buildRecordUploadControlCommand(1);
+  }
+
+  /**
+   * 构建停止记录上传命令（0x0A, 0x00）
+   */
+  static buildStopRecordUploadCommand(): BluetoothKeyCommand {
+    return CommandUtils.buildRecordUploadControlCommand(0);
+  }
+
+  /**
+   * 解析开锁日志数据（0x0B）
+   * @param data 开锁日志数据
+   * @returns 解析后的开锁日志信息
+   */
+  static parseUnlockLogData(data: Uint8Array): {
+    operationType: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK';
+    operationResult: 'SUCCESS' | 'FAILED';
+    lockId: string;
+    operationTime: Date;
+    rawData: Uint8Array;
+  } {
+    if (data.length !== 13) {
+      throw new Error(`开锁日志数据长度错误，期望: 13字节，实际: ${data.length}字节`);
+    }
+
+    const operationType = data[1];
+    const operationResult = data[2];
+    const lockIdBytes = data.slice(3, 7);
+    const timeBytes = data.slice(7, 13);
+
+    // 解析操作类型
+    let operationTypeStr: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK';
+    switch (operationType) {
+      case 0x00:
+        operationTypeStr = 'NORMAL_UNLOCK';
+        break;
+      case 0x01:
+        operationTypeStr = 'FORCE_UNLOCK';
+        break;
+      case 0x02:
+        operationTypeStr = 'NORMAL_LOCK';
+        break;
+      case 0x03:
+        operationTypeStr = 'FORCE_LOCK';
+        break;
+      default:
+        throw new Error(`无效的操作类型: 0x${operationType.toString(16)}`);
+    }
+
+    // 解析操作结果
+    const operationResultStr = operationResult === 0x01 ? 'SUCCESS' : 'FAILED';
+
+    // 解析锁ID（小端模式）
+    const lockId = CommandUtils.uint8ArrayToNumber(lockIdBytes);
+
+    // 解析操作时间（BCD格式）
+    const operationTime = CommandUtils.bcdToDate(timeBytes);
+
+    return {
+      operationType: operationTypeStr,
+      operationResult: operationResultStr,
+      lockId: lockId.toString(),
+      operationTime,
+      rawData: data
+    };
+  }
+
+  /**
+   * BCD时间转换为Date对象
+   * @param bcdTime BCD格式的时间数据（6字节：年月日时分秒）
+   * @returns Date对象
+   */
+  static bcdToDate(bcdTime: Uint8Array): Date {
+    if (bcdTime.length !== 6) {
+      throw new Error(`BCD时间数据长度错误，期望: 6字节，实际: ${bcdTime.length}字节`);
+    }
+
+    // BCD解码
+    const year = ((bcdTime[0] >> 4) * 10 + (bcdTime[0] & 0x0F)) + 2000; // 假设是20xx年
+    const month = (bcdTime[1] >> 4) * 10 + (bcdTime[1] & 0x0F) - 1; // 月份从0开始
+    const day = (bcdTime[2] >> 4) * 10 + (bcdTime[2] & 0x0F);
+    const hour = (bcdTime[3] >> 4) * 10 + (bcdTime[3] & 0x0F);
+    const minute = (bcdTime[4] >> 4) * 10 + (bcdTime[4] & 0x0F);
+    const second = (bcdTime[5] >> 4) * 10 + (bcdTime[5] & 0x0F);
+
+    return new Date(year, month, day, hour, minute, second);
+  }
+
+  /**
+   * 检查是否为开锁日志数据
+   * @param data 数据
+   * @returns 是否为开锁日志
+   */
+  static isUnlockLogData(data: Uint8Array): boolean {
+    return data.length >= 1 && data[0] === 0x0B;
+  }
+
+  /**
+   * 获取操作类型描述
+   * @param operationType 操作类型
+   * @returns 操作类型描述
+   */
+  static getOperationTypeDescription(operationType: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK'): string {
+    switch (operationType) {
+      case 'NORMAL_UNLOCK':
+        return '正常开锁';
+      case 'FORCE_UNLOCK':
+        return '强制开锁';
+      case 'NORMAL_LOCK':
+        return '正常关锁';
+      case 'FORCE_LOCK':
+        return '强制关锁';
+      default:
+        return '未知操作';
+    }
+  }
+
+  /**
    * 构建自定义命令
    */
   static buildCustomCommand(command: string, data?: Uint8Array, timeout?: number): BluetoothKeyCommand {
@@ -193,6 +526,18 @@ export class CommandUtils {
       
       case 0x07: // UPLOAD_STATUS
         return this.validateUploadStatusResponse(response);
+
+      case 0x0C: // TASK_CONFIG
+        return this.validateTaskConfigResponse(response);
+      
+      case 0x0D: // LOCK_SEGMENTS
+        return this.validateLockSegmentsResponse(response);
+      
+      case 0x0A: // RECORD_UPLOAD_CONTROL
+        return this.validateRecordUploadControlResponse(response);
+      
+      case 0x0B: // UNLOCK_LOG
+        return this.validateUnlockLogData(response);
       
       case 0x02: // 第二次认证
       case 0x03: // 第三次认证
@@ -379,6 +724,110 @@ export class CommandUtils {
         keyLength: keyData.length
       }
     };
+  }
+
+  /**
+   * 验证任务配置响应（0x0C）
+   */
+  private static validateTaskConfigResponse(response: Uint8Array): {
+    isValid: boolean;
+    error?: string;
+    parsedData?: any;
+  } {
+    if (response.length !== 2) {
+      return { isValid: false, error: `任务配置响应长度错误，期望: 2字节，实际: ${response.length}字节` };
+    }
+
+    const result = response[1];
+    if (result !== 0x01) {
+      return { isValid: false, error: `任务配置操作失败，结果码: 0x${result.toString(16)}` };
+    }
+
+    return { 
+      isValid: true, 
+      parsedData: { 
+        command: response[0],
+        result: result
+      }
+    };
+  }
+
+  /**
+   * 验证锁具段下发响应（0x0D）
+   */
+  private static validateLockSegmentsResponse(response: Uint8Array): {
+    isValid: boolean;
+    error?: string;
+    parsedData?: any;
+  } {
+    if (response.length !== 2) {
+      return { isValid: false, error: `锁具段下发响应长度错误，期望: 2字节，实际: ${response.length}字节` };
+    }
+
+    const result = response[1];
+    if (result !== 0x01) {
+      return { isValid: false, error: `锁具段下发操作失败，结果码: 0x${result.toString(16)}` };
+    }
+
+    return { 
+      isValid: true, 
+      parsedData: { 
+        command: response[0],
+        result: result
+      }
+    };
+  }
+
+  /**
+   * 验证记录上传控制响应（0x0A）
+   */
+  private static validateRecordUploadControlResponse(response: Uint8Array): {
+    isValid: boolean;
+    error?: string;
+    parsedData?: any;
+  } {
+    if (response.length !== 2) {
+      return { isValid: false, error: `记录上传控制响应长度错误，期望: 2字节，实际: ${response.length}字节` };
+    }
+
+    const result = response[1];
+    if (result !== 0x01) {
+      return { isValid: false, error: `记录上传控制操作失败，结果码: 0x${result.toString(16)}` };
+    }
+
+    return { 
+      isValid: true, 
+      parsedData: { 
+        command: response[0],
+        result: result
+      }
+    };
+  }
+
+  /**
+   * 验证开锁日志数据（0x0B）
+   */
+  private static validateUnlockLogData(response: Uint8Array): {
+    isValid: boolean;
+    error?: string;
+    parsedData?: any;
+  } {
+    if (response.length !== 13) {
+      return { isValid: false, error: `开锁日志数据长度错误，期望: 13字节，实际: ${response.length}字节` };
+    }
+
+    try {
+      const parsedData = CommandUtils.parseUnlockLogData(response);
+      return { 
+        isValid: true, 
+        parsedData 
+      };
+    } catch (error) {
+      return { 
+        isValid: false, 
+        error: error instanceof Error ? error.message : '开锁日志数据解析失败' 
+      };
+    }
   }
 
   /**

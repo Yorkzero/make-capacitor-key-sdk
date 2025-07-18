@@ -184,8 +184,39 @@ export interface BluetoothKeyConfig {
   secretKey?: string; // AES加密密钥
 }
 
+// 开锁日志信息
+export interface UnlockLogInfo {
+  operationType: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK';
+  operationResult: 'SUCCESS' | 'FAILED';
+  lockId: string;
+  operationTime: Date;
+  rawData: Uint8Array;
+}
+
+// 记录上传状态枚举
+export enum RecordUploadStatus {
+  IDLE = 'idle',           // 空闲状态
+  STARTING = 'starting',   // 开始传输中
+  UPLOADING = 'uploading', // 传输中
+  PAUSING = 'pausing',     // 暂停传输中
+  PAUSED = 'paused',       // 已暂停
+  COMPLETING = 'completing', // 完成传输中
+  COMPLETED = 'completed',   // 传输完成
+  ERROR = 'error'          // 错误状态
+}
+
+// 记录上传状态信息
+export interface RecordUploadState {
+  status: RecordUploadStatus;
+  deviceId: string;
+  startTime?: Date;
+  endTime?: Date;
+  error?: string;
+  logCount?: number;       // 已传输的日志数量
+}
+
 export interface BluetoothKeyEvent {
-  type: 'connected' | 'disconnected' | 'dataReceived' | 'error' | 'deviceReport' | 'lockStatusReport' | 'deviceInfoReport' | 'deviceFound' | 'scanCompleted';
+  type: 'connected' | 'disconnected' | 'dataReceived' | 'error' | 'deviceReport' | 'lockStatusReport' | 'deviceInfoReport' | 'unlockLogReport' | 'recordUploadStatusChanged' | 'deviceFound' | 'scanCompleted';
   deviceId?: string;
   data?: Uint8Array | BluetoothKeyDevice;
   error?: string;
@@ -194,6 +225,11 @@ export interface BluetoothKeyEvent {
   deviceInfo?: DeviceInfo;
   lockId?: string;
   timestamp?: Date;
+  logInfo?: UnlockLogInfo;
+  operationType?: 'NORMAL_UNLOCK' | 'FORCE_UNLOCK' | 'NORMAL_LOCK' | 'FORCE_LOCK';
+  operationResult?: 'SUCCESS' | 'FAILED';
+  operationTime?: Date;
+  recordUploadState?: RecordUploadState;
 }
 
 export type BluetoothKeyEventListener = (event: BluetoothKeyEvent) => void;
